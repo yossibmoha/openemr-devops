@@ -476,7 +476,7 @@ fi
 
 if [ "$1" == "build-api-docs" ]; then
     echo "Building and placing api swagger docs"
-    php /var/www/localhost/htdocs/openemr/bin/command-runner -c CreateAPIDocumentation
+    php /var/www/localhost/htdocs/openemr/bin/console openemr:create-api-documentation
 fi
 
 if [ "$1" == "register-oauth2-client" ]; then
