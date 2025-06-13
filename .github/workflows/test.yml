@@ -5,51 +5,96 @@ on:
     branches:
     - master
     paths:
-    - '.github/workflows/test.yml'
-    - 'docker/openemr/**'
+    - '.github/workflows/test-prod.yml'
+    - 'docker/openemr/[0-9]*.[0-9]*.[0-9]/**'
+    - 'docker/openemr/flex-*/**'
   pull_request:
     branches:
     - master
     paths:
-    - '.github/workflows/test.yml'
-    - 'docker/openemr/**'
+    - '.github/workflows/test-prod.yml'
+    - 'docker/openemr/[0-9]*.[0-9]*.[0-9]/**'
+    - 'docker/openemr/flex-*/**'
+
+env:
+  COMPOSE_BAKE: "1"
+  DOCKER_BUILDKIT: "1"
 
 jobs:
+  collect:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - name: Collect OpenEMR Prod Dockerfiles
+      id: docker-dirs
+      ##
+      # Parse out the test parameters from subdirectories of docker/openemr
+      # Use that output as a test matrix in github actions.
+      run: |
+        shopt -s nullglob
+        dirs=( docker/openemr/*/Dockerfile )
+        if (( "${#dirs[@]}" == 0 )); then
+          echo 'No Dockerfiles found in docker/openemr subdirectories.' >&2
+          exit 1
+        fi
+        dirs=( "${dirs[@]%/Dockerfile}" )
+        dirs=( "${dirs[@]#docker/openemr/}" )
+        # Use jq to ensure that the output is valid JSON or fail trying.
+        # The output (after '=') must be valid JSON for GitHub Actions to use it as a matrix.
+        {
+          printf 'docker_dirs='
+          printf '"%s"\n' "${dirs[@]}" | jq -sc '.'
+        } >> "$GITHUB_OUTPUT"
+    outputs:
+      docker_dirs: ${{ steps.docker-dirs.outputs.docker_dirs }}
   build-and-test:
     name: Test OpenEMR Image
     runs-on: ubuntu-latest
+    needs: collect
     strategy:
       fail-fast: false
       matrix:
-        docker-dir:
-        - 6.1.0
-        - 7.0.0
-        - 7.0.1
-        - 7.0.2
-        - 7.0.3
-        - 7.0.4
+        docker-dir: ${{ fromJson(needs.collect.outputs.docker_dirs) }}
     defaults:
       run:
-        working-directory: docker/openemr
+        working-directory: openemr-devops/docker/openemr
+    env:
+      COMPOSE_PROFILES: "${{ startsWith(matrix.docker-dir, 'flex-') && 'flex' || 'prod' }}"
+      DOCKER_CONTEXT_PATH: "${{ matrix.docker-dir }}"
+      OPENEMR_SERVICE_NAME: "${{ startsWith(matrix.docker-dir, 'flex-') && 'openemr-flex' || 'openemr' }}"
 
     steps:
     - name: Checkout
       uses: actions/checkout@v3
+      with:
+        path: openemr-devops
+
+    - name: Checkout OpenEMR
+      if: ${{ startsWith(matrix.docker-dir, 'flex-') }}
+      uses: actions/checkout@v3
+      with:
+        repository: openemr/openemr
+        path: openemr
+
+    - name: Verify Docker Compose Configuration
+      run: docker compose config
 
     - name: Build the Docker image
-      env:
-        COMPOSE_BAKE: "1"
-        DOCKER_BUILDKIT: "1"
-        DOCKER_CONTEXT_PATH: "${{matrix.docker-dir}}"
       run: docker compose build
 
     - name: Run the containers
-      run: docker compose up --detach --wait --wait-timeout 180
+      run: docker compose up --detach --wait --wait-timeout 600
 
     - name: Check container status
+      if: always()
       run: |
         docker compose ps
-        docker compose logs openemr
+        docker compose logs "${OPENEMR_SERVICE_NAME}"
+
+    - name: Get PHP Configuration
+      if: always()
+      run: |
+        docker compose exec --workdir /var/www/localhost/htdocs/openemr "${OPENEMR_SERVICE_NAME}" php -i
 
     - name: Test web connectivity
       run: |
@@ -63,42 +108,56 @@ jobs:
         echo "OpenEMR web server is not responding correctly!"
         exit 1
 
-    - name: Install and configure
+    - name: Install
       run: |
         docker compose exec --workdir /var/www/localhost/htdocs/openemr/contrib/util/installScripts \
-          openemr sh -c 'sed -e "s@^exit;@ @" InstallerAuto.php |
-                         php -- rootpass=root server=mysql loginhost=%'
-        docker compose exec openemr mysql -u openemr --password="openemr" -h mysql -e 'INSERT INTO product_registration (opt_out) VALUES (1);
-                                                                                       UPDATE globals SET gl_value = 1 WHERE gl_name = "rest_api";
-                                                                                       UPDATE globals SET gl_value = 1 WHERE gl_name = "rest_fhir_api";
-                                                                                       UPDATE globals SET gl_value = 1 WHERE gl_name = "rest_portal_api";
-                                                                                       UPDATE globals SET gl_value = 3 WHERE gl_name = "oauth_password_grant";
-                                                                                       UPDATE globals SET gl_value = 1 WHERE gl_name = "rest_system_scopes_api";' openemr
-        docker compose exec openemr composer install --dev --no-interaction --optimize-autoloader
+          "${OPENEMR_SERVICE_NAME}" sh -c 'sed -e "s@^exit;@ @" InstallerAuto.php |
+                                           php -- rootpass=root server=mysql loginhost=%'
+    - name: Initialize MySQL
+      run: |
+        docker compose exec "${OPENEMR_SERVICE_NAME}" mysql -u openemr --password="openemr" -h mysql -e '
+            INSERT INTO product_registration (opt_out) VALUES (1);
+            UPDATE globals SET gl_value = 1 WHERE gl_name = "rest_api";
+            UPDATE globals SET gl_value = 1 WHERE gl_name = "rest_fhir_api";
+            UPDATE globals SET gl_value = 1 WHERE gl_name = "rest_portal_api";
+            UPDATE globals SET gl_value = 3 WHERE gl_name = "oauth_password_grant";
+            UPDATE globals SET gl_value = 1 WHERE gl_name = "rest_system_scopes_api";
+        ' openemr
+
+    - name: Install Dev Tools
+      run: |
+        docker compose exec --workdir /var/www/localhost/htdocs/openemr "${OPENEMR_SERVICE_NAME}" \
+          composer install --dev --no-interaction --optimize-autoloader --ignore-platform-reqs
 
     - name: Unit Test
       run: |
-        docker compose exec openemr php -d memory_limit=8G ./vendor/bin/phpunit --colors=always --testdox --stop-on-failure --testsuite unit
+        docker compose exec --workdir /var/www/localhost/htdocs/openemr "${OPENEMR_SERVICE_NAME}" \
+          php -d memory_limit=8G ./vendor/bin/phpunit --colors=always --testdox --stop-on-failure --testsuite unit
 
     - name: Fixtures testing
       run: |
-        docker compose exec openemr php -d memory_limit=8G ./vendor/bin/phpunit --colors=always --testdox --stop-on-failure --testsuite fixtures
+        docker compose exec --workdir /var/www/localhost/htdocs/openemr "${OPENEMR_SERVICE_NAME}" \
+          php -d memory_limit=8G ./vendor/bin/phpunit --colors=always --testdox --stop-on-failure --testsuite fixtures
 
     - name: Services testing
       run: |
-        docker compose exec openemr php -d memory_limit=8G ./vendor/bin/phpunit --colors=always --testdox --stop-on-failure --testsuite services
+        docker compose exec --workdir /var/www/localhost/htdocs/openemr "${OPENEMR_SERVICE_NAME}" \
+          php -d memory_limit=8G ./vendor/bin/phpunit --colors=always --testdox --stop-on-failure --testsuite services
 
     - name: Validators testing
       run: |
-        docker compose exec openemr php -d memory_limit=8G ./vendor/bin/phpunit --colors=always --testdox --stop-on-failure --testsuite validators
+        docker compose exec --workdir /var/www/localhost/htdocs/openemr "${OPENEMR_SERVICE_NAME}" \
+          php -d memory_limit=8G ./vendor/bin/phpunit --colors=always --testdox --stop-on-failure --testsuite validators
 
     - name: Controllers testing
       run: |
-        docker compose exec openemr php -d memory_limit=8G ./vendor/bin/phpunit --colors=always --testdox --stop-on-failure --testsuite controllers
+        docker compose exec --workdir /var/www/localhost/htdocs/openemr "${OPENEMR_SERVICE_NAME}" \
+          php -d memory_limit=8G ./vendor/bin/phpunit --colors=always --testdox --stop-on-failure --testsuite controllers
 
     - name: Common testing
       run: |
-        docker compose exec openemr php -d memory_limit=8G ./vendor/bin/phpunit --colors=always --testdox --stop-on-failure --testsuite common
+        docker compose exec --workdir /var/www/localhost/htdocs/openemr "${OPENEMR_SERVICE_NAME}" \
+          php -d memory_limit=8G ./vendor/bin/phpunit --colors=always --testdox --stop-on-failure --testsuite common
 
     - name: Cleanup
       if: always()
