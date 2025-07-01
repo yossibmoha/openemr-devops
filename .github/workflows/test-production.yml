@@ -1,0 +1,32 @@
+# This will run the OpenEMR production docker tests.
+#  - Collects the production docker targets [0-9]*.[0-9]*.[0-9 from the docker/openemr directory.
+#  - is_production_docker is required and needs to be true.
+#  - production_coverage_openemr_version is optional and should be set to the OpenEMR docker version to
+#    use for coverage. Current strategy is to use the latest nightly build development versions.
+
+name: OpenEMR Production Dockers Test
+
+on:
+  push:
+    branches:
+    - master
+    paths:
+    - '.github/workflows/test-production.yml'
+    - 'docker/openemr/[0-9]*.[0-9]*.[0-9]/**'
+    - '.github/actions/test-actions-core/action.yml'
+    - '.github/workflows/test-core.yml'
+  pull_request:
+    branches:
+    - master
+    paths:
+    - '.github/workflows/test-production.yml'
+    - 'docker/openemr/[0-9]*.[0-9]*.[0-9]/**'
+    - '.github/actions/test-actions-core/action.yml'
+    - '.github/workflows/test-core.yml'
+
+jobs:
+  build:
+    uses: ./.github/workflows/test-core.yml
+    with:
+      is_production_docker: true
+      production_coverage_openemr_version: '7.0.4'

@@ -16,7 +16,7 @@ RUN apk add --no-cache \
 RUN usermod -u 1000 apache
 
 #BELOW LINE NEEDED TO SUPPORT PHP8 ON ALPINE 3.13+; SHOULD BE ABLE TO REMOVE THIS IN FUTURE ALPINE VERSIONS
-RUN cp /usr/bin/php83 /usr/bin/php
+RUN ln -sf /usr/bin/php83 /usr/bin/php
 # Install composer for openemr package building
 RUN curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/bin --filename=composer
 

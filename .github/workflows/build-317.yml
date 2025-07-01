@@ -21,7 +21,7 @@ jobs:
       - name: Build and push flex 3.17 docker
         uses: docker/build-push-action@v3
         with:
-          context: "{{defaultContext}}:docker/openemr/flex-3.17"
+          context: "{{defaultContext}}:docker/openemr/obsolete/flex-3.17"
           tags: openemr/openemr:flex-3.17
           platforms: linux/amd64,linux/arm64
           push: true

@@ -47,21 +47,32 @@ services:
       interval: 1m
       timeout: 5s
       retries: 3
-  openemr-flex:
-    extends:
-      service: openemr
-    profiles: !override
-    - flex
-    volumes:
-    - ../../openemr:/var/www/localhost/htdocs/openemr
   openemr-kcov:
     extends:
-      service: openemr-flex
+      service: openemr
     profiles: !override
     - kcov
     build:
       context: ${DOCKER_CONTEXT_PATH}
       target: kcov
     volumes:
+    - ./coverage-reports:/var/www/localhost/htdocs/coverage
+  openemr-dev:
+    extends:
+      service: openemr
+    profiles: !override
+    - dev
+    environment:
+      EMPTY: "yes"
+    volumes:
     - ../../openemr:/var/www/localhost/htdocs/openemr
+  openemr-kcov-dev:
+    extends:
+      service: openemr-dev
+    profiles: !override
+    - kcov-dev
+    build:
+      context: ${DOCKER_CONTEXT_PATH}
+      target: kcov
+    volumes:
     - ./coverage-reports:/var/www/localhost/htdocs/coverage
